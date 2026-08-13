@@ -18,7 +18,7 @@ if (!RPC_URL || !OWNER_PRIVATE_KEY || !CONTRACT_ADDRESS) {
 }
 
 // ---------- ABI corregido ----------
-const DONATION_WALLET_ABI = [
+const PRIVATE_KEY= [
   "function usdcToken() view returns (address)",
   "function owner() view returns (address)",
   "function getContractBalance() view returns (uint256)",   // <--- Corregido
