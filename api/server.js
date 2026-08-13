@@ -77,6 +77,41 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend funcionando correctamente");
 });
 
+// ---------- RUTA /api/debug (temporal, para diagnosticar el mismatch de red/USDC) ----------
+app.get("/api/debug", async (req, res) => {
+  const result = {};
+  try {
+    result.chainId = (await provider.getNetwork()).chainId.toString();
+  } catch (err) {
+    result.chainIdError = err.message;
+  }
+  try {
+    result.usdcAddress = await contract.usdcToken();
+  } catch (err) {
+    result.usdcAddressError = err.message;
+  }
+  try {
+    result.ownerAddress = await contract.owner();
+  } catch (err) {
+    result.ownerAddressError = err.message;
+  }
+  try {
+    result.contractCode = await provider.getCode(CONTRACT_ADDRESS);
+    result.contractHasCode = result.contractCode !== "0x";
+  } catch (err) {
+    result.contractCodeError = err.message;
+  }
+  if (result.usdcAddress) {
+    try {
+      const usdcCode = await provider.getCode(result.usdcAddress);
+      result.usdcHasCode = usdcCode !== "0x";
+    } catch (err) {
+      result.usdcCodeError = err.message;
+    }
+  }
+  res.json(result);
+});
+
 // ---------- RUTA /api/info (con más detalles de error) ----------
 app.get("/api/info", async (req, res) => {
   try {
