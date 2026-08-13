@@ -9,14 +9,23 @@ app.use(cors());
 app.use(express.json());
 
 const RPC_URL = process.env.MAINNET_RPC_URL;
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY;
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
-  console.error("❌ Faltan variables de entorno. Revisa MAINNET_RPC_URL, PRIVATE_KEY, CONTRACT_ADDRESS");
-  // En serverless no llamamos a process.exit, lanzamos error para que Vercel lo muestre
-  throw new Error("Faltan variables de entorno");
+// Verificación de variables de entorno (sin lanzar error, solo imprimir)
+let isConfigured = true;
+if (!RPC_URL || !OWNER_PRIVATE_KEY || !CONTRACT_ADDRESS) {
+  console.error("❌ Faltan variables de entorno. Revisa MAINNET_RPC_URL, OWNER_PRIVATE_KEY, CONTRACT_ADDRESS");
+  isConfigured = false;
 }
+
+// Middleware que verifica configuración
+app.use((req, res, next) => {
+  if (!isConfigured) {
+    return res.status(500).json({ error: "Backend no configurado: faltan variables de entorno" });
+  }
+  next();
+});
 
 const DONATION_WALLET_ABI = [
   "function usdcToken() view returns (address)",
@@ -37,7 +46,7 @@ const ERC20_ABI = [
 ];
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
-const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
+const ownerWallet = new ethers.Wallet(OWNER_PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
 
 let usdcContract;
@@ -72,7 +81,7 @@ app.get("/api/info", async (req, res) => {
       chainId: network.chainId.toString(),
     });
   } catch (err) {
-    console.error(err);
+    console.error("Error en /api/info:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -90,8 +99,13 @@ app.get("/api/balance/:address", async (req, res) => {
     let donationError = null;
     try {
       donation = await contract.calculateDonation(address);
-    } catch {
+    } catch (err) {
+      // Este error es esperado si el saldo es insuficiente, no lo mostramos como error crítico
       donationError = "Balance insuficiente para el mínimo de donación (0.1 USDC)";
+      // Solo log si no es el error de balance (por si hay otro tipo de error)
+      if (!err.message.includes("execution reverted")) {
+        console.error("Error inesperado en calculateDonation:", err);
+      }
     }
 
     res.json({
@@ -103,7 +117,7 @@ app.get("/api/balance/:address", async (req, res) => {
       donationError,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Error en /api/balance:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -112,16 +126,34 @@ app.post("/api/donate", async (req, res) => {
   try {
     const { donor, amount, donorBalance, validAfter, validBefore, nonce, v, r, s } = req.body;
 
-    if (
-      !donor || !amount || !donorBalance ||
-      validAfter === undefined || !validBefore ||
-      !nonce || v === undefined || !r || !s
-    ) {
-      return res.status(400).json({ error: "Faltan campos requeridos en la solicitud" });
+    // Validación de campos
+    const missingFields = [];
+    if (!donor) missingFields.push("donor");
+    if (!amount) missingFields.push("amount");
+    if (!donorBalance) missingFields.push("donorBalance");
+    if (validAfter === undefined) missingFields.push("validAfter");
+    if (!validBefore) missingFields.push("validBefore");
+    if (!nonce) missingFields.push("nonce");
+    if (v === undefined) missingFields.push("v");
+    if (!r) missingFields.push("r");
+    if (!s) missingFields.push("s");
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: `Faltan campos requeridos: ${missingFields.join(", ")}`,
+      });
     }
 
-    console.log(`📥 Procesando donación de ${donor}...`);
+    // Log detallado de la solicitud
+    console.log(`📥 Procesando donación de ${donor}`);
+    console.log(`  amount: ${amount}`);
+    console.log(`  donorBalance: ${donorBalance}`);
+    console.log(`  validAfter: ${validAfter}`);
+    console.log(`  validBefore: ${validBefore}`);
+    console.log(`  nonce: ${nonce}`);
+    console.log(`  v: ${v}, r: ${r.slice(0, 10)}..., s: ${s.slice(0, 10)}...`);
 
+    // Llamada al contrato
     const tx = await contract.processDonation(
       donor,
       amount,
@@ -137,6 +169,7 @@ app.post("/api/donate", async (req, res) => {
     console.log("⏳ Tx enviada:", tx.hash);
     const receipt = await tx.wait();
 
+    // Buscar evento DonationReceived
     const donationReceived = receipt.logs.some((log) => {
       try {
         const parsed = contract.interface.parseLog(log);
@@ -155,8 +188,10 @@ app.post("/api/donate", async (req, res) => {
       explorerUrl: `https://etherscan.io/tx/${tx.hash}`,
     });
   } catch (err) {
-    console.error("❌ Error procesando donación:", err);
-    res.status(500).json({ error: err.reason || err.message });
+    console.error("❌ Error en /api/donate:", err);
+    // Enviar mensaje de error detallado
+    const errorMsg = err.reason || err.message || "Error desconocido";
+    res.status(500).json({ error: errorMsg });
   }
 });
 
@@ -170,14 +205,15 @@ app.get("/api/donor/:address", async (req, res) => {
       donationCount: count.toString(),
     });
   } catch (err) {
+    console.error("Error en /api/donor:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- MANEJADOR DE RUTAS NO ENCONTRADAS (opcional) ----------
+// ---------- 404 ----------
 app.use((req, res) => {
   res.status(404).json({ error: "Ruta no encontrada" });
 });
 
-// ---------- EXPORTACIÓN PARA VERCEL (serverless) ----------
+// ---------- EXPORTACIÓN ----------
 export default app;
