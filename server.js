@@ -156,7 +156,7 @@ app.post("/api/donate", async (req, res) => {
       success: donationReceived,
       txHash: tx.hash,
       blockNumber: receipt.blockNumber,
-      explorerUrl: `https://sepolia.etherscan.io/tx/${tx.hash}`,
+      explorerUrl: `https://etherscan.io/tx/${tx.hash}`,
     });
   } catch (err) {
     console.error("❌ Error procesando donación:", err);
