@@ -9,24 +9,36 @@ app.use(cors());
 app.use(express.json());
 
 const RPC_URL = process.env.MAINNET_RPC_URL;
-const OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-if (!RPC_URL || !OWNER_PRIVATE_KEY || !CONTRACT_ADDRESS) {
+// Verificar variables de entorno y guardar estado
+let isConfigured = true;
+if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
   console.error("❌ Faltan variables de entorno");
-  throw new Error("Faltan variables de entorno");
+  isConfigured = false;
 }
 
-// ---------- ABI corregido ----------
-const PRIVATE_KEY= [
+// Si no está configurado, devolvemos error en todas las rutas
+app.use((req, res, next) => {
+  if (!isConfigured) {
+    return res.status(500).json({ error: "Backend no configurado: faltan variables de entorno" });
+  }
+  next();
+});
+
+// ABI del contrato (alineado con el contrato DonationWallet.sol real)
+const DONATION_WALLET_ABI = [
   "function usdcToken() view returns (address)",
   "function owner() view returns (address)",
-  "function getContractBalance() view returns (uint256)",   // <--- Corregido
-  "function calculateRequiredDonation(address donor) view returns (uint256)", // <--- Corregido
+  "function getContractBalance() view returns (uint256)",
+  "function getDonorBalance(address donor) view returns (uint256)",
+  "function calculateRequiredDonation(address donor) view returns (uint256)",
   "function getDonorStats(address donor) view returns (uint256 total, uint256 count)",
   "function processDonation(address donor, uint256 amount, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) returns (bool)",
   "function withdrawDonations(address to, uint256 amount)",
-  "event DonationReceived(address indexed donor, uint256 amount, uint256 donorBalance, uint256 timestamp)",
+  "function withdrawAll()",
+  "event DonationReceived(address indexed donor, uint256 amount, uint256 donorBalanceAfter, uint256 timestamp)",
   "event DonationFailed(address indexed donor, bytes32 indexed nonce, string reason)",
 ];
 
@@ -36,34 +48,51 @@ const ERC20_ABI = [
   "function name() view returns (string)",
 ];
 
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const ownerWallet = new ethers.Wallet(OWNER_PRIVATE_KEY, provider);
-const contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
+let provider, ownerWallet, contract, usdcContract;
 
-let usdcContract;
+try {
+  provider = new ethers.JsonRpcProvider(RPC_URL);
+  ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
+} catch (err) {
+  console.error("❌ Error inicializando proveedor/contrato:", err);
+  isConfigured = false;
+}
 
 async function getUsdcContract() {
   if (!usdcContract) {
-    const usdcAddress = await contract.usdcToken();
-    usdcContract = new ethers.Contract(usdcAddress, ERC20_ABI, provider);
+    try {
+      const usdcAddress = await contract.usdcToken();
+      usdcContract = new ethers.Contract(usdcAddress, ERC20_ABI, provider);
+    } catch (err) {
+      console.error("❌ Error obteniendo dirección USDC:", err);
+      throw err;
+    }
   }
   return usdcContract;
 }
 
-// ---------- Ruta raíz ----------
+// ---------- RUTA RAÍZ ----------
 app.get("/", (req, res) => {
   res.send("🚀 Backend funcionando correctamente");
 });
 
-// ---------- /api/info (ahora usa getContractBalance) ----------
+// ---------- RUTA /api/info (con más detalles de error) ----------
 app.get("/api/info", async (req, res) => {
   try {
+    // Verificar que contract esté definido
+    if (!contract) {
+      return res.status(500).json({ error: "Contrato no inicializado" });
+    }
+
+    // Llamar a las funciones del contrato
     const [usdcAddress, owner, contractBalance, network] = await Promise.all([
       contract.usdcToken(),
       contract.owner(),
-      contract.getContractBalance(),   // <--- Corregido
+      contract.getContractBalance(),
       provider.getNetwork(),
     ]);
+
     res.json({
       contractAddress: CONTRACT_ADDRESS,
       usdcAddress,
@@ -72,12 +101,18 @@ app.get("/api/info", async (req, res) => {
       chainId: network.chainId.toString(),
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Error en /api/info:", err);
+    // Enviar mensaje de error detallado pero sin exponer datos sensibles
+    res.status(500).json({
+      error: "Error al obtener información del contrato",
+      details: err.message,
+      // Opcional: si es un error de CALL_EXCEPTION, mostrar más datos
+      ...(err.code === "CALL_EXCEPTION" && { reason: err.reason, data: err.data }),
+    });
   }
 });
 
-// ---------- /api/balance/:address ----------
+// ---------- RUTA /api/balance/:address ----------
 app.get("/api/balance/:address", async (req, res) => {
   try {
     const { address } = req.params;
@@ -90,9 +125,11 @@ app.get("/api/balance/:address", async (req, res) => {
     let donation = 0n;
     let donationError = null;
     try {
-      donation = await contract.calculateRequiredDonation(address); // <--- Corregido
-    } catch {
+      donation = await contract.calculateRequiredDonation(address);
+    } catch (err) {
+      // Si el error es por "require(false)" lo manejamos como error de saldo insuficiente
       donationError = "Balance insuficiente para el mínimo de donación (0.1 USDC)";
+      // No lanzamos el error para que la respuesta continúe
     }
 
     res.json({
@@ -104,18 +141,18 @@ app.get("/api/balance/:address", async (req, res) => {
       donationError,
     });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Error en /api/balance:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- /api/donate (sin cambios, pero verifica parámetros) ----------
+// ---------- RUTA /api/donate ----------
 app.post("/api/donate", async (req, res) => {
   try {
-    const { donor, amount, donorBalance, validAfter, validBefore, nonce, v, r, s } = req.body;
+    const { donor, amount, validAfter, validBefore, nonce, v, r, s } = req.body;
 
     if (
-      !donor || !amount || !donorBalance ||
+      !donor || !amount ||
       validAfter === undefined || !validBefore ||
       !nonce || v === undefined || !r || !s
     ) {
@@ -123,17 +160,11 @@ app.post("/api/donate", async (req, res) => {
     }
 
     console.log(`📥 Procesando donación de ${donor}...`);
-    console.log("Amount:", amount.toString());
-    console.log("DonorBalance:", donorBalance.toString());
-    console.log("ValidAfter:", validAfter);
-    console.log("ValidBefore:", validBefore);
-    console.log("Nonce:", nonce);
-    console.log("v/r/s:", v, r, s);
 
     const tx = await contract.processDonation(
       donor,
       amount,
-      validAfter,        // <--- El orden correcto según tu ABI
+      validAfter,
       validBefore,
       nonce,
       v,
@@ -167,7 +198,7 @@ app.post("/api/donate", async (req, res) => {
   }
 });
 
-// ---------- /api/donor/:address ----------
+// ---------- RUTA /api/donor/:address ----------
 app.get("/api/donor/:address", async (req, res) => {
   try {
     const { address } = req.params;
@@ -178,13 +209,21 @@ app.get("/api/donor/:address", async (req, res) => {
       donationCount: count.toString(),
     });
   } catch (err) {
+    console.error("❌ Error en /api/donor:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- 404 ----------
+// ---------- MANEJADOR DE RUTAS NO ENCONTRADAS ----------
 app.use((req, res) => {
   res.status(404).json({ error: "Ruta no encontrada" });
 });
 
+// ---------- MANEJADOR DE ERRORES GLOBAL ----------
+app.use((err, req, res, next) => {
+  console.error("❌ Error global:", err);
+  res.status(500).json({ error: "Error interno del servidor" });
+});
+
+// ---------- EXPORTACIÓN PARA VERCEL ----------
 export default app;
