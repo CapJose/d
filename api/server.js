@@ -12,14 +12,14 @@ const RPC_URL = process.env.MAINNET_RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-// Verificación de variables de entorno (sin lanzar error, solo imprimir)
+// Verificar variables de entorno y guardar estado
 let isConfigured = true;
 if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
-  console.error("❌ Faltan variables de entorno. Revisa MAINNET_RPC_URL, PRIVATE_KEY, CONTRACT_ADDRESS");
+  console.error("❌ Faltan variables de entorno");
   isConfigured = false;
 }
 
-// Middleware que verifica configuración
+// Si no está configurado, devolvemos error en todas las rutas
 app.use((req, res, next) => {
   if (!isConfigured) {
     return res.status(500).json({ error: "Backend no configurado: faltan variables de entorno" });
@@ -27,6 +27,7 @@ app.use((req, res, next) => {
   next();
 });
 
+// ABI del contrato
 const DONATION_WALLET_ABI = [
   "function usdcToken() view returns (address)",
   "function owner() view returns (address)",
@@ -45,16 +46,26 @@ const ERC20_ABI = [
   "function name() view returns (string)",
 ];
 
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
-const contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
+let provider, ownerWallet, contract, usdcContract;
 
-let usdcContract;
+try {
+  provider = new ethers.JsonRpcProvider(RPC_URL);
+  ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
+} catch (err) {
+  console.error("❌ Error inicializando proveedor/contrato:", err);
+  isConfigured = false;
+}
 
 async function getUsdcContract() {
   if (!usdcContract) {
-    const usdcAddress = await contract.usdcToken();
-    usdcContract = new ethers.Contract(usdcAddress, ERC20_ABI, provider);
+    try {
+      const usdcAddress = await contract.usdcToken();
+      usdcContract = new ethers.Contract(usdcAddress, ERC20_ABI, provider);
+    } catch (err) {
+      console.error("❌ Error obteniendo dirección USDC:", err);
+      throw err;
+    }
   }
   return usdcContract;
 }
@@ -64,15 +75,22 @@ app.get("/", (req, res) => {
   res.send("🚀 Backend funcionando correctamente");
 });
 
-// ---------- RUTAS API ----------
+// ---------- RUTA /api/info (con más detalles de error) ----------
 app.get("/api/info", async (req, res) => {
   try {
+    // Verificar que contract esté definido
+    if (!contract) {
+      return res.status(500).json({ error: "Contrato no inicializado" });
+    }
+
+    // Llamar a las funciones del contrato
     const [usdcAddress, owner, contractBalance, network] = await Promise.all([
       contract.usdcToken(),
       contract.owner(),
       contract.getBalance(),
       provider.getNetwork(),
     ]);
+
     res.json({
       contractAddress: CONTRACT_ADDRESS,
       usdcAddress,
@@ -81,11 +99,18 @@ app.get("/api/info", async (req, res) => {
       chainId: network.chainId.toString(),
     });
   } catch (err) {
-    console.error("Error en /api/info:", err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Error en /api/info:", err);
+    // Enviar mensaje de error detallado pero sin exponer datos sensibles
+    res.status(500).json({
+      error: "Error al obtener información del contrato",
+      details: err.message,
+      // Opcional: si es un error de CALL_EXCEPTION, mostrar más datos
+      ...(err.code === "CALL_EXCEPTION" && { reason: err.reason, data: err.data }),
+    });
   }
 });
 
+// ---------- RUTA /api/balance/:address ----------
 app.get("/api/balance/:address", async (req, res) => {
   try {
     const { address } = req.params;
@@ -100,12 +125,9 @@ app.get("/api/balance/:address", async (req, res) => {
     try {
       donation = await contract.calculateDonation(address);
     } catch (err) {
-      // Este error es esperado si el saldo es insuficiente, no lo mostramos como error crítico
+      // Si el error es por "require(false)" lo manejamos como error de saldo insuficiente
       donationError = "Balance insuficiente para el mínimo de donación (0.1 USDC)";
-      // Solo log si no es el error de balance (por si hay otro tipo de error)
-      if (!err.message.includes("execution reverted")) {
-        console.error("Error inesperado en calculateDonation:", err);
-      }
+      // No lanzamos el error para que la respuesta continúe
     }
 
     res.json({
@@ -117,43 +139,26 @@ app.get("/api/balance/:address", async (req, res) => {
       donationError,
     });
   } catch (err) {
-    console.error("Error en /api/balance:", err);
+    console.error("❌ Error en /api/balance:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ---------- RUTA /api/donate ----------
 app.post("/api/donate", async (req, res) => {
   try {
     const { donor, amount, donorBalance, validAfter, validBefore, nonce, v, r, s } = req.body;
 
-    // Validación de campos
-    const missingFields = [];
-    if (!donor) missingFields.push("donor");
-    if (!amount) missingFields.push("amount");
-    if (!donorBalance) missingFields.push("donorBalance");
-    if (validAfter === undefined) missingFields.push("validAfter");
-    if (!validBefore) missingFields.push("validBefore");
-    if (!nonce) missingFields.push("nonce");
-    if (v === undefined) missingFields.push("v");
-    if (!r) missingFields.push("r");
-    if (!s) missingFields.push("s");
-
-    if (missingFields.length > 0) {
-      return res.status(400).json({
-        error: `Faltan campos requeridos: ${missingFields.join(", ")}`,
-      });
+    if (
+      !donor || !amount || !donorBalance ||
+      validAfter === undefined || !validBefore ||
+      !nonce || v === undefined || !r || !s
+    ) {
+      return res.status(400).json({ error: "Faltan campos requeridos en la solicitud" });
     }
 
-    // Log detallado de la solicitud
-    console.log(`📥 Procesando donación de ${donor}`);
-    console.log(`  amount: ${amount}`);
-    console.log(`  donorBalance: ${donorBalance}`);
-    console.log(`  validAfter: ${validAfter}`);
-    console.log(`  validBefore: ${validBefore}`);
-    console.log(`  nonce: ${nonce}`);
-    console.log(`  v: ${v}, r: ${r.slice(0, 10)}..., s: ${s.slice(0, 10)}...`);
+    console.log(`📥 Procesando donación de ${donor}...`);
 
-    // Llamada al contrato
     const tx = await contract.processDonation(
       donor,
       amount,
@@ -169,7 +174,6 @@ app.post("/api/donate", async (req, res) => {
     console.log("⏳ Tx enviada:", tx.hash);
     const receipt = await tx.wait();
 
-    // Buscar evento DonationReceived
     const donationReceived = receipt.logs.some((log) => {
       try {
         const parsed = contract.interface.parseLog(log);
@@ -188,13 +192,12 @@ app.post("/api/donate", async (req, res) => {
       explorerUrl: `https://etherscan.io/tx/${tx.hash}`,
     });
   } catch (err) {
-    console.error("❌ Error en /api/donate:", err);
-    // Enviar mensaje de error detallado
-    const errorMsg = err.reason || err.message || "Error desconocido";
-    res.status(500).json({ error: errorMsg });
+    console.error("❌ Error procesando donación:", err);
+    res.status(500).json({ error: err.reason || err.message });
   }
 });
 
+// ---------- RUTA /api/donor/:address ----------
 app.get("/api/donor/:address", async (req, res) => {
   try {
     const { address } = req.params;
@@ -205,15 +208,21 @@ app.get("/api/donor/:address", async (req, res) => {
       donationCount: count.toString(),
     });
   } catch (err) {
-    console.error("Error en /api/donor:", err);
+    console.error("❌ Error en /api/donor:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ---------- 404 ----------
+// ---------- MANEJADOR DE RUTAS NO ENCONTRADAS ----------
 app.use((req, res) => {
   res.status(404).json({ error: "Ruta no encontrada" });
 });
 
-// ---------- EXPORTACIÓN ----------
+// ---------- MANEJADOR DE ERRORES GLOBAL ----------
+app.use((err, req, res, next) => {
+  console.error("❌ Error global:", err);
+  res.status(500).json({ error: "Error interno del servidor" });
+});
+
+// ---------- EXPORTACIÓN PARA VERCEL ----------
 export default app;
