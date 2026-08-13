@@ -1,4 +1,4 @@
-// backend/server.js
+// api/server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -8,16 +8,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3001;
 const RPC_URL = process.env.MAINNET_RPC_URL;
 const OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY;
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
 if (!RPC_URL || !OWNER_PRIVATE_KEY || !CONTRACT_ADDRESS) {
-  console.error(
-    "❌ Faltan variables de entorno. Revisa tu .env (MAINNET_RPC_URL, OWNER_PRIVATE_KEY, CONTRACT_ADDRESS)"
-  );
-  process.exit(1);
+  console.error("❌ Faltan variables de entorno. Revisa MAINNET_RPC_URL, OWNER_PRIVATE_KEY, CONTRACT_ADDRESS");
+  // En serverless no llamamos a process.exit, lanzamos error para que Vercel lo muestre
+  throw new Error("Faltan variables de entorno");
 }
 
 const DONATION_WALLET_ABI = [
@@ -42,7 +40,7 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const ownerWallet = new ethers.Wallet(OWNER_PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
 
-let usdcContract; // se inicializa la primera vez que se necesita
+let usdcContract;
 
 async function getUsdcContract() {
   if (!usdcContract) {
@@ -52,8 +50,12 @@ async function getUsdcContract() {
   return usdcContract;
 }
 
-// --- Rutas ---
+// ---------- RUTA RAÍZ ----------
+app.get("/", (req, res) => {
+  res.send("🚀 Backend funcionando correctamente");
+});
 
+// ---------- RUTAS API ----------
 app.get("/api/info", async (req, res) => {
   try {
     const [usdcAddress, owner, contractBalance, network] = await Promise.all([
@@ -111,15 +113,9 @@ app.post("/api/donate", async (req, res) => {
     const { donor, amount, donorBalance, validAfter, validBefore, nonce, v, r, s } = req.body;
 
     if (
-      !donor ||
-      !amount ||
-      !donorBalance ||
-      validAfter === undefined ||
-      !validBefore ||
-      !nonce ||
-      v === undefined ||
-      !r ||
-      !s
+      !donor || !amount || !donorBalance ||
+      validAfter === undefined || !validBefore ||
+      !nonce || v === undefined || !r || !s
     ) {
       return res.status(400).json({ error: "Faltan campos requeridos en la solicitud" });
     }
@@ -178,7 +174,10 @@ app.get("/api/donor/:address", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Backend corriendo en http://localhost:${PORT}`);
-  console.log(`📄 Contrato: ${CONTRACT_ADDRESS}`);
+// ---------- MANEJADOR DE RUTAS NO ENCONTRADAS (opcional) ----------
+app.use((req, res) => {
+  res.status(404).json({ error: "Ruta no encontrada" });
 });
+
+// ---------- EXPORTACIÓN PARA VERCEL (serverless) ----------
+export default app;
