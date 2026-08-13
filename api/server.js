@@ -6,13 +6,38 @@ import cors from "cors";
 import { ethers } from "ethers";
 
 // ======================================================
-// CONFIGURACIÓN
+// APP
 // ======================================================
 
 const app = express();
 
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
+
+app.disable("x-powered-by");
+
+// ======================================================
+// CORS - TEMPORALMENTE ABIERTO PARA TODOS
+// ======================================================
+
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+app.use(
+  express.json({
+    limit: "50kb",
+    strict: true,
+  })
+);
+
+// ======================================================
+// VARIABLES DE ENTORNO
+// ======================================================
 
 const RPC_URL = process.env.MAINNET_RPC_URL?.trim();
 const PRIVATE_KEY = process.env.PRIVATE_KEY?.trim();
@@ -22,66 +47,11 @@ const EXPECTED_CHAIN_ID = process.env.EXPECTED_CHAIN_ID
   ? BigInt(process.env.EXPECTED_CHAIN_ID)
   : null;
 
-const EXPLORER_BASE_URL = process.env.EXPLORER_BASE_URL?.replace(/\/$/, "");
-
-// Ejemplo:
-// ALLOWED_ORIGINS=http://localhost:5173,https://miweb.com
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const EXPLORER_BASE_URL =
+  process.env.EXPLORER_BASE_URL?.replace(/\/$/, "") || null;
 
 // ======================================================
-// MIDDLEWARE
-// ======================================================
-
-app.disable("x-powered-by");
-
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Permitir herramientas server-to-server, Postman, curl, etc.
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      // En desarrollo, si no hay lista configurada, permitir.
-      if (!IS_PRODUCTION && ALLOWED_ORIGINS.length === 0) {
-        return callback(null, true);
-      }
-
-      if (ALLOWED_ORIGINS.includes(origin)) {
-        return callback(null, true);
-      }
-
-      const error = new Error("Origen no permitido por CORS");
-      error.statusCode = 403;
-
-      return callback(error);
-    },
-
-    methods: ["GET", "POST", "OPTIONS"],
-
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-    ],
-
-    maxAge: 86400,
-  })
-);
-
-// Limitar tamaño del body.
-// Evita requests gigantes innecesarios.
-app.use(
-  express.json({
-    limit: "50kb",
-    strict: true,
-  })
-);
-
-// ======================================================
-// ABI
+// ABI DONATION WALLET
 // ======================================================
 
 const DONATION_WALLET_ABI = [
@@ -101,6 +71,10 @@ const DONATION_WALLET_ABI = [
   "event DonationFailed(address indexed donor, bytes32 indexed nonce, string reason)",
 ];
 
+// ======================================================
+// ABI ERC20 / USDC
+// ======================================================
+
 const ERC20_ABI = [
   "function balanceOf(address account) view returns (uint256)",
   "function decimals() view returns (uint8)",
@@ -116,11 +90,16 @@ let blockchain = null;
 let initializationPromise = null;
 
 // ======================================================
-// ERRORES PERSONALIZADOS
+// ERROR PERSONALIZADO
 // ======================================================
 
 class AppError extends Error {
-  constructor(message, statusCode = 500, code = "INTERNAL_ERROR", details = null) {
+  constructor(
+    message,
+    statusCode = 500,
+    code = "INTERNAL_ERROR",
+    details = null
+  ) {
     super(message);
 
     this.name = "AppError";
@@ -131,7 +110,7 @@ class AppError extends Error {
 }
 
 // ======================================================
-// HELPERS
+// ASYNC HANDLER
 // ======================================================
 
 function asyncHandler(handler) {
@@ -139,6 +118,10 @@ function asyncHandler(handler) {
     Promise.resolve(handler(req, res, next)).catch(next);
   };
 }
+
+// ======================================================
+// VALIDAR VARIABLES DE ENTORNO
+// ======================================================
 
 function validateEnvironment() {
   const missing = [];
@@ -171,7 +154,6 @@ function validateEnvironment() {
     );
   }
 
-  // Esto valida indirectamente la private key.
   try {
     new ethers.Wallet(PRIVATE_KEY);
   } catch {
@@ -182,6 +164,10 @@ function validateEnvironment() {
     );
   }
 }
+
+// ======================================================
+// VALIDAR ADDRESS
+// ======================================================
 
 function validateAddress(address, fieldName = "address") {
   if (
@@ -198,6 +184,10 @@ function validateAddress(address, fieldName = "address") {
   return ethers.getAddress(address);
 }
 
+// ======================================================
+// VALIDAR BYTES32
+// ======================================================
+
 function validateBytes32(value, fieldName) {
   if (
     typeof value !== "string" ||
@@ -213,6 +203,10 @@ function validateBytes32(value, fieldName) {
   return value;
 }
 
+// ======================================================
+// PARSEAR UINT256
+// ======================================================
+
 function parseUnsignedInteger(value, fieldName) {
   if (
     value === null ||
@@ -226,23 +220,6 @@ function parseUnsignedInteger(value, fieldName) {
     );
   }
 
-  /*
-   * IMPORTANTE:
-   *
-   * Preferimos strings para números blockchain.
-   *
-   * Correcto:
-   * {
-   *   "amount": "1000000"
-   * }
-   *
-   * Evitar:
-   * {
-   *   "amount": 1000000000000000000
-   * }
-   *
-   * porque JavaScript puede perder precisión.
-   */
   if (
     typeof value === "number" &&
     !Number.isSafeInteger(value)
@@ -277,15 +254,14 @@ function parseUnsignedInteger(value, fieldName) {
   return parsed;
 }
 
+// ======================================================
+// VALIDAR V
+// ======================================================
+
 function validateSignatureV(value) {
   const parsed = parseUnsignedInteger(value, "v");
 
-  /*
-   * Firmas Ethereum tradicionales utilizan normalmente
-   * 27/28, aunque algunas implementaciones entregan 0/1.
-   *
-   * Las normalizamos a 27/28.
-   */
+  // Algunas wallets devuelven 0/1
   if (parsed === 0n) {
     return 27;
   }
@@ -305,6 +281,10 @@ function validateSignatureV(value) {
   );
 }
 
+// ======================================================
+// OBTENER MENSAJE DE ERROR
+// ======================================================
+
 function getErrorMessage(error) {
   if (!error) {
     return "Error desconocido";
@@ -320,15 +300,24 @@ function getErrorMessage(error) {
   );
 }
 
+// ======================================================
+// OBTENER REVERT REASON
+// ======================================================
+
 function getRevertReason(error) {
   return (
     error?.reason ||
     error?.revert?.args?.[0] ||
     error?.info?.error?.message ||
+    error?.error?.message ||
     error?.shortMessage ||
     null
   );
 }
+
+// ======================================================
+// EXPLORER
+// ======================================================
 
 function getExplorerUrl(chainId, txHash) {
   if (EXPLORER_BASE_URL) {
@@ -336,19 +325,25 @@ function getExplorerUrl(chainId, txHash) {
   }
 
   const explorers = {
+    // Ethereum
     "1": "https://etherscan.io",
     "11155111": "https://sepolia.etherscan.io",
 
+    // Polygon
     "137": "https://polygonscan.com",
     "80002": "https://amoy.polygonscan.com",
 
+    // Base
     "8453": "https://basescan.org",
     "84532": "https://sepolia.basescan.org",
 
+    // Arbitrum
     "42161": "https://arbiscan.io",
 
+    // Optimism
     "10": "https://optimistic.etherscan.io",
 
+    // BSC
     "56": "https://bscscan.com",
   };
 
@@ -362,18 +357,27 @@ function getExplorerUrl(chainId, txHash) {
 }
 
 // ======================================================
-// INICIALIZACIÓN BLOCKCHAIN
+// INICIALIZAR BLOCKCHAIN
 // ======================================================
 
 async function initializeBlockchain() {
   validateEnvironment();
 
-  console.log("🔌 Inicializando conexión blockchain...");
+  console.log("🔌 Inicializando blockchain...");
+
+  // ----------------------------------------------------
+  // PROVIDER
+  // ----------------------------------------------------
 
   const provider = new ethers.JsonRpcProvider(RPC_URL);
 
-  // Comprueba conexión RPC.
+  // ----------------------------------------------------
+  // NETWORK
+  // ----------------------------------------------------
+
   const network = await provider.getNetwork();
+
+  console.log(`🌐 RPC conectado a chainId: ${network.chainId}`);
 
   if (
     EXPECTED_CHAIN_ID !== null &&
@@ -386,49 +390,59 @@ async function initializeBlockchain() {
     );
   }
 
-  // Verificar que realmente exista código en CONTRACT_ADDRESS.
-  const contractCode = await provider.getCode(CONTRACT_ADDRESS);
+  // ----------------------------------------------------
+  // COMPROBAR CONTRATO
+  // ----------------------------------------------------
+
+  const contractCode =
+    await provider.getCode(CONTRACT_ADDRESS);
 
   if (!contractCode || contractCode === "0x") {
     throw new AppError(
-      `No existe ningún contrato desplegado en ${CONTRACT_ADDRESS} para chainId ${network.chainId}`,
+      `No existe contrato desplegado en ${CONTRACT_ADDRESS} para chainId ${network.chainId}`,
       503,
       "CONTRACT_NOT_DEPLOYED"
     );
   }
+
+  // ----------------------------------------------------
+  // WALLET
+  // ----------------------------------------------------
 
   const ownerWallet = new ethers.Wallet(
     PRIVATE_KEY,
     provider
   );
 
-  /*
-   * Contrato de lectura.
-   *
-   * Para funciones view no necesitamos firmante.
-   */
+  // ----------------------------------------------------
+  // CONTRATO READ
+  // ----------------------------------------------------
+
   const readContract = new ethers.Contract(
     CONTRACT_ADDRESS,
     DONATION_WALLET_ABI,
     provider
   );
 
-  /*
-   * Contrato de escritura.
-   *
-   * processDonation necesita poder enviar una TX.
-   */
+  // ----------------------------------------------------
+  // CONTRATO WRITE
+  // ----------------------------------------------------
+
   const writeContract = new ethers.Contract(
     CONTRACT_ADDRESS,
     DONATION_WALLET_ABI,
     ownerWallet
   );
 
-  // Validar que este contrato responde a nuestra ABI.
-  const [usdcAddressRaw, ownerRaw] = await Promise.all([
-    readContract.usdcToken(),
-    readContract.owner(),
-  ]);
+  // ----------------------------------------------------
+  // OBTENER USDC Y OWNER
+  // ----------------------------------------------------
+
+  const [usdcAddressRaw, ownerRaw] =
+    await Promise.all([
+      readContract.usdcToken(),
+      readContract.owner(),
+    ]);
 
   const usdcAddress = validateAddress(
     usdcAddressRaw,
@@ -440,8 +454,12 @@ async function initializeBlockchain() {
     "owner"
   );
 
-  // Comprobar que USDC también sea un contrato.
-  const usdcCode = await provider.getCode(usdcAddress);
+  // ----------------------------------------------------
+  // COMPROBAR USDC
+  // ----------------------------------------------------
+
+  const usdcCode =
+    await provider.getCode(usdcAddress);
 
   if (!usdcCode || usdcCode === "0x") {
     throw new AppError(
@@ -451,64 +469,140 @@ async function initializeBlockchain() {
     );
   }
 
+  // ----------------------------------------------------
+  // CONTRATO USDC
+  // ----------------------------------------------------
+
   const usdcContract = new ethers.Contract(
     usdcAddress,
     ERC20_ABI,
     provider
   );
 
-  const [decimals, name, symbol] = await Promise.all([
-    usdcContract.decimals(),
-    usdcContract.name().catch(() => "USDC"),
-    usdcContract.symbol().catch(() => "USDC"),
-  ]);
+  // ----------------------------------------------------
+  // INFORMACIÓN TOKEN
+  // ----------------------------------------------------
 
-  if (Number(decimals) < 0 || Number(decimals) > 255) {
+  const [decimals, name, symbol] =
+    await Promise.all([
+      usdcContract.decimals(),
+
+      usdcContract
+        .name()
+        .catch(() => "USD Coin"),
+
+      usdcContract
+        .symbol()
+        .catch(() => "USDC"),
+    ]);
+
+  const usdcDecimals = Number(decimals);
+
+  if (
+    !Number.isInteger(usdcDecimals) ||
+    usdcDecimals < 0 ||
+    usdcDecimals > 255
+  ) {
     throw new AppError(
       "El token devuelve decimals inválidos",
       503,
-      "INVALID_TOKEN"
+      "INVALID_TOKEN_DECIMALS"
     );
   }
 
   const signerAddress = ownerWallet.address;
 
-  console.log("✅ Blockchain inicializada");
-  console.log(`🌐 Chain ID: ${network.chainId}`);
-  console.log(`📜 Contrato: ${CONTRACT_ADDRESS}`);
-  console.log(`💵 Token: ${symbol} (${usdcAddress})`);
-  console.log(`👑 Owner contrato: ${owner}`);
-  console.log(`🔐 Backend signer: ${signerAddress}`);
+  // ----------------------------------------------------
+  // LOGS
+  // ----------------------------------------------------
+
+  console.log("======================================");
+  console.log("✅ BLOCKCHAIN INICIALIZADA");
+  console.log("======================================");
+
+  console.log(
+    `🌐 Chain ID: ${network.chainId}`
+  );
+
+  console.log(
+    `📜 DonationWallet: ${CONTRACT_ADDRESS}`
+  );
+
+  console.log(
+    `💵 Token: ${symbol}`
+  );
+
+  console.log(
+    `💵 Token address: ${usdcAddress}`
+  );
+
+  console.log(
+    `💵 Decimals: ${usdcDecimals}`
+  );
+
+  console.log(
+    `👑 Owner contrato: ${owner}`
+  );
+
+  console.log(
+    `🔐 Backend signer: ${signerAddress}`
+  );
+
+  // ----------------------------------------------------
+  // COMPROBAR OWNER
+  // ----------------------------------------------------
 
   if (
-    owner.toLowerCase() !== signerAddress.toLowerCase()
+    owner.toLowerCase() !==
+    signerAddress.toLowerCase()
   ) {
     console.warn(
-      "⚠️ PRIVATE_KEY no corresponde al owner() del contrato"
+      "⚠️ ADVERTENCIA: PRIVATE_KEY no corresponde al owner() del contrato"
+    );
+  } else {
+    console.log(
+      "✅ Backend signer coincide con owner()"
     );
   }
 
+  console.log("======================================");
+
+  // ----------------------------------------------------
+  // RETORNAR CONTEXTO
+  // ----------------------------------------------------
+
   return {
     provider,
+
     network,
+
     chainId: network.chainId,
 
     ownerWallet,
 
     readContract,
+
     writeContract,
 
     owner,
+
     signerAddress,
 
     usdcAddress,
+
     usdcContract,
-    usdcDecimals: Number(decimals),
+
+    usdcDecimals,
 
     tokenName: name,
+
     tokenSymbol: symbol,
   };
 }
+
+// ======================================================
+// GET BLOCKCHAIN
+// ======================================================
 
 async function getBlockchain() {
   if (blockchain) {
@@ -516,34 +610,34 @@ async function getBlockchain() {
   }
 
   /*
-   * Evita inicializaciones concurrentes si llegan
-   * varios requests simultáneamente.
+   * Esto evita que si entran 10 requests al mismo tiempo
+   * inicialicemos 10 providers/contratos.
    */
   if (!initializationPromise) {
-    initializationPromise = initializeBlockchain()
-      .then((result) => {
-        blockchain = result;
-        return result;
-      })
-      .catch((error) => {
-        /*
-         * IMPORTANTE:
-         *
-         * No dejamos una Promise rechazada cacheada.
-         * Así si Alchemy/Infura/RPC falla temporalmente,
-         * una petición futura puede volver a intentar.
-         */
-        initializationPromise = null;
+    initializationPromise =
+      initializeBlockchain()
+        .then((result) => {
+          blockchain = result;
 
-        throw error;
-      });
+          return result;
+        })
+        .catch((error) => {
+          /*
+           * Si RPC falla temporalmente no guardamos
+           * para siempre una promise rechazada.
+           */
+
+          initializationPromise = null;
+
+          throw error;
+        });
   }
 
   return initializationPromise;
 }
 
 // ======================================================
-// HEALTH CHECK
+// ROOT
 // ======================================================
 
 app.get("/", (req, res) => {
@@ -551,49 +645,61 @@ app.get("/", (req, res) => {
     success: true,
     service: "Donation Wallet API",
     status: "running",
+    cors: "open",
   });
 });
 
+// ======================================================
+// HEALTH
+// ======================================================
+
 app.get(
   "/api/health",
+
   asyncHandler(async (req, res) => {
     try {
       const ctx = await getBlockchain();
 
-      const blockNumber = await ctx.provider.getBlockNumber();
+      const blockNumber =
+        await ctx.provider.getBlockNumber();
 
       return res.status(200).json({
         success: true,
+
         status: "healthy",
 
         blockchain: {
           connected: true,
-          chainId: ctx.chainId.toString(),
+
+          chainId:
+            ctx.chainId.toString(),
+
           blockNumber,
         },
       });
     } catch (error) {
       return res.status(503).json({
         success: false,
+
         status: "unhealthy",
+
         blockchain: {
           connected: false,
         },
 
-        ...(!IS_PRODUCTION && {
-          error: getErrorMessage(error),
-        }),
+        error: getErrorMessage(error),
       });
     }
   })
 );
 
 // ======================================================
-// /api/info
+// API INFO
 // ======================================================
 
 app.get(
   "/api/info",
+
   asyncHandler(async (req, res) => {
     const ctx = await getBlockchain();
 
@@ -611,19 +717,25 @@ app.get(
       ctx.provider.getBlockNumber(),
     ]);
 
-    return res.json({
+    return res.status(200).json({
       success: true,
 
       network: {
-        chainId: ctx.chainId.toString(),
+        chainId:
+          ctx.chainId.toString(),
+
         blockNumber,
       },
 
       contract: {
-        address: CONTRACT_ADDRESS,
-        owner: ctx.owner,
+        address:
+          CONTRACT_ADDRESS,
 
-        backendSigner: ctx.signerAddress,
+        owner:
+          ctx.owner,
+
+        backendSigner:
+          ctx.signerAddress,
 
         signerIsOwner:
           ctx.signerAddress.toLowerCase() ===
@@ -631,67 +743,89 @@ app.get(
       },
 
       token: {
-        address: ctx.usdcAddress,
-        name: ctx.tokenName,
-        symbol: ctx.tokenSymbol,
-        decimals: ctx.usdcDecimals,
+        address:
+          ctx.usdcAddress,
+
+        name:
+          ctx.tokenName,
+
+        symbol:
+          ctx.tokenSymbol,
+
+        decimals:
+          ctx.usdcDecimals,
       },
 
       balances: {
-        contractRaw: contractBalance.toString(),
+        contractRaw:
+          contractBalance.toString(),
 
-        contractFormatted: ethers.formatUnits(
-          contractBalance,
-          ctx.usdcDecimals
-        ),
+        contractFormatted:
+          ethers.formatUnits(
+            contractBalance,
+            ctx.usdcDecimals
+          ),
 
-        signerNative: ethers.formatEther(
-          nativeBalance
-        ),
+        signerNative:
+          ethers.formatEther(
+            nativeBalance
+          ),
       },
     });
   })
 );
 
 // ======================================================
-// /api/balance/:address
+// BALANCE
 // ======================================================
 
 app.get(
   "/api/balance/:address",
-  asyncHandler(async (req, res) => {
-    const address = validateAddress(
-      req.params.address
-    );
 
-    const ctx = await getBlockchain();
+  asyncHandler(async (req, res) => {
+    const address =
+      validateAddress(
+        req.params.address
+      );
+
+    const ctx =
+      await getBlockchain();
+
+    // --------------------------------------------------
+    // OBTENER BALANCES
+    // --------------------------------------------------
 
     const [
       balance,
       donorBalance,
     ] = await Promise.all([
-      ctx.usdcContract.balanceOf(address),
+      ctx.usdcContract.balanceOf(
+        address
+      ),
 
-      ctx.readContract.getDonorBalance(address),
+      ctx.readContract.getDonorBalance(
+        address
+      ),
     ]);
+
+    // --------------------------------------------------
+    // CALCULAR DONACIÓN
+    // --------------------------------------------------
 
     let donationAmount = null;
     let donationError = null;
 
     try {
       donationAmount =
-        await ctx.readContract.calculateRequiredDonation(
-          address
-        );
+        await ctx.readContract
+          .calculateRequiredDonation(
+            address
+          );
     } catch (error) {
-      /*
-       * Ya NO asumimos que cualquier revert significa
-       * "saldo insuficiente".
-       *
-       * Guardamos la razón real si existe.
-       */
       donationError = {
-        code: error.code || "CALCULATION_REVERTED",
+        code:
+          error.code ||
+          "CALCULATION_REVERTED",
 
         message:
           getRevertReason(error) ||
@@ -699,43 +833,56 @@ app.get(
       };
     }
 
-    return res.json({
+    // --------------------------------------------------
+    // RESPUESTA
+    // --------------------------------------------------
+
+    return res.status(200).json({
       success: true,
 
       address,
 
       token: {
-        symbol: ctx.tokenSymbol,
-        decimals: ctx.usdcDecimals,
+        symbol:
+          ctx.tokenSymbol,
+
+        decimals:
+          ctx.usdcDecimals,
       },
 
       walletBalance: {
-        raw: balance.toString(),
+        raw:
+          balance.toString(),
 
-        formatted: ethers.formatUnits(
-          balance,
-          ctx.usdcDecimals
-        ),
+        formatted:
+          ethers.formatUnits(
+            balance,
+            ctx.usdcDecimals
+          ),
       },
 
       donorBalance: {
-        raw: donorBalance.toString(),
+        raw:
+          donorBalance.toString(),
 
-        formatted: ethers.formatUnits(
-          donorBalance,
-          ctx.usdcDecimals
-        ),
+        formatted:
+          ethers.formatUnits(
+            donorBalance,
+            ctx.usdcDecimals
+          ),
       },
 
       requiredDonation:
         donationAmount !== null
           ? {
-              raw: donationAmount.toString(),
+              raw:
+                donationAmount.toString(),
 
-              formatted: ethers.formatUnits(
-                donationAmount,
-                ctx.usdcDecimals
-              ),
+              formatted:
+                ethers.formatUnits(
+                  donationAmount,
+                  ctx.usdcDecimals
+                ),
             }
           : null,
 
@@ -745,46 +892,54 @@ app.get(
 );
 
 // ======================================================
-// /api/donor/:address
+// DONOR STATS
 // ======================================================
 
 app.get(
   "/api/donor/:address",
-  asyncHandler(async (req, res) => {
-    const address = validateAddress(
-      req.params.address
-    );
 
-    const ctx = await getBlockchain();
+  asyncHandler(async (req, res) => {
+    const address =
+      validateAddress(
+        req.params.address
+      );
+
+    const ctx =
+      await getBlockchain();
 
     const [total, count] =
-      await ctx.readContract.getDonorStats(address);
+      await ctx.readContract
+        .getDonorStats(address);
 
-    return res.json({
+    return res.status(200).json({
       success: true,
 
       address,
 
       totalDonated: {
-        raw: total.toString(),
+        raw:
+          total.toString(),
 
-        formatted: ethers.formatUnits(
-          total,
-          ctx.usdcDecimals
-        ),
+        formatted:
+          ethers.formatUnits(
+            total,
+            ctx.usdcDecimals
+          ),
       },
 
-      donationCount: count.toString(),
+      donationCount:
+        count.toString(),
     });
   })
 );
 
 // ======================================================
-// /api/donate
+// DONATE
 // ======================================================
 
 app.post(
   "/api/donate",
+
   asyncHandler(async (req, res) => {
     const {
       donor,
@@ -797,29 +952,33 @@ app.post(
       s,
     } = req.body || {};
 
-    // --------------------------------------------------
-    // Validar parámetros
-    // --------------------------------------------------
+    // ==================================================
+    // VALIDACIONES
+    // ==================================================
 
-    const normalizedDonor = validateAddress(
-      donor,
-      "donor"
-    );
+    const normalizedDonor =
+      validateAddress(
+        donor,
+        "donor"
+      );
 
-    const parsedAmount = parseUnsignedInteger(
-      amount,
-      "amount"
-    );
+    const parsedAmount =
+      parseUnsignedInteger(
+        amount,
+        "amount"
+      );
 
-    const parsedValidAfter = parseUnsignedInteger(
-      validAfter,
-      "validAfter"
-    );
+    const parsedValidAfter =
+      parseUnsignedInteger(
+        validAfter,
+        "validAfter"
+      );
 
-    const parsedValidBefore = parseUnsignedInteger(
-      validBefore,
-      "validBefore"
-    );
+    const parsedValidBefore =
+      parseUnsignedInteger(
+        validBefore,
+        "validBefore"
+      );
 
     if (parsedAmount === 0n) {
       throw new AppError(
@@ -830,7 +989,8 @@ app.post(
     }
 
     if (
-      parsedValidBefore <= parsedValidAfter
+      parsedValidBefore <=
+      parsedValidAfter
     ) {
       throw new AppError(
         "validBefore debe ser mayor que validAfter",
@@ -839,53 +999,88 @@ app.post(
       );
     }
 
-    const normalizedNonce = validateBytes32(
-      nonce,
-      "nonce"
-    );
+    const normalizedNonce =
+      validateBytes32(
+        nonce,
+        "nonce"
+      );
 
-    const normalizedR = validateBytes32(r, "r");
-    const normalizedS = validateBytes32(s, "s");
+    const normalizedR =
+      validateBytes32(
+        r,
+        "r"
+      );
 
-    const normalizedV = validateSignatureV(v);
+    const normalizedS =
+      validateBytes32(
+        s,
+        "s"
+      );
 
-    const ctx = await getBlockchain();
+    const normalizedV =
+      validateSignatureV(v);
+
+    // ==================================================
+    // BLOCKCHAIN
+    // ==================================================
+
+    const ctx =
+      await getBlockchain();
 
     console.log(
-      `📥 Solicitud de donación: donor=${normalizedDonor}, amount=${parsedAmount}`
+      "======================================"
     );
 
-    // --------------------------------------------------
-    // SIMULAR LA TRANSACCIÓN
-    // --------------------------------------------------
+    console.log(
+      "📥 NUEVA SOLICITUD DE DONACIÓN"
+    );
+
+    console.log(
+      `👤 Donor: ${normalizedDonor}`
+    );
+
+    console.log(
+      `💰 Amount raw: ${parsedAmount}`
+    );
+
+    console.log(
+      `💰 Amount: ${ethers.formatUnits(
+        parsedAmount,
+        ctx.usdcDecimals
+      )} ${ctx.tokenSymbol}`
+    );
+
+    // ==================================================
+    // STATIC CALL
+    // ==================================================
 
     /*
-     * Este paso es MUY importante.
+     * Simulamos primero.
      *
-     * Ejecutamos eth_call usando exactamente la misma
-     * función antes de mandar una transacción real.
-     *
-     * Si la autorización ya fue usada, está expirada,
-     * amount es incorrecto, no existe balance,
-     * processDonation hace revert, etc., detenemos aquí.
-     *
-     * No gastamos gas innecesariamente.
+     * Si el contrato va a hacer revert, detenemos
+     * la operación antes de gastar gas.
      */
 
     try {
-      await ctx.writeContract.processDonation.staticCall(
-        normalizedDonor,
-        parsedAmount,
-        parsedValidAfter,
-        parsedValidBefore,
-        normalizedNonce,
-        normalizedV,
-        normalizedR,
-        normalizedS
+      await ctx.writeContract
+        .processDonation
+        .staticCall(
+          normalizedDonor,
+          parsedAmount,
+          parsedValidAfter,
+          parsedValidBefore,
+          normalizedNonce,
+          normalizedV,
+          normalizedR,
+          normalizedS
+        );
+
+      console.log(
+        "✅ Simulación correcta"
       );
     } catch (error) {
       console.error(
-        "❌ Simulación de donación fallida:",
+        "❌ Simulación fallida:",
         getErrorMessage(error)
       );
 
@@ -897,24 +1092,30 @@ app.post(
       );
     }
 
-    // --------------------------------------------------
+    // ==================================================
     // ESTIMAR GAS
-    // --------------------------------------------------
+    // ==================================================
 
-    let estimatedGas = null;
+    let estimatedGas;
 
     try {
       estimatedGas =
-        await ctx.writeContract.processDonation.estimateGas(
-          normalizedDonor,
-          parsedAmount,
-          parsedValidAfter,
-          parsedValidBefore,
-          normalizedNonce,
-          normalizedV,
-          normalizedR,
-          normalizedS
-        );
+        await ctx.writeContract
+          .processDonation
+          .estimateGas(
+            normalizedDonor,
+            parsedAmount,
+            parsedValidAfter,
+            parsedValidBefore,
+            normalizedNonce,
+            normalizedV,
+            normalizedR,
+            normalizedS
+          );
+
+      console.log(
+        `⛽ Gas estimado: ${estimatedGas}`
+      );
     } catch (error) {
       console.error(
         "❌ Error estimando gas:",
@@ -922,35 +1123,56 @@ app.post(
       );
 
       throw new AppError(
-        "No fue posible estimar el gas de la donación",
+        getRevertReason(error) ||
+          "No fue posible estimar el gas",
         400,
         "GAS_ESTIMATION_FAILED"
       );
     }
 
-    // --------------------------------------------------
-    // ENVIAR TX
-    // --------------------------------------------------
+    // ==================================================
+    // ENVIAR TRANSACCIÓN
+    // ==================================================
 
-    const tx =
-      await ctx.writeContract.processDonation(
-        normalizedDonor,
-        parsedAmount,
-        parsedValidAfter,
-        parsedValidBefore,
-        normalizedNonce,
-        normalizedV,
-        normalizedR,
-        normalizedS
+    let tx;
+
+    try {
+      tx =
+        await ctx.writeContract
+          .processDonation(
+            normalizedDonor,
+            parsedAmount,
+            parsedValidAfter,
+            parsedValidBefore,
+            normalizedNonce,
+            normalizedV,
+            normalizedR,
+            normalizedS
+          );
+    } catch (error) {
+      console.error(
+        "❌ Error enviando TX:",
+        getErrorMessage(error)
       );
 
-    console.log(`⏳ TX enviada: ${tx.hash}`);
+      throw new AppError(
+        getRevertReason(error) ||
+          "No fue posible enviar la transacción",
+        400,
+        "TRANSACTION_SEND_FAILED"
+      );
+    }
 
-    // --------------------------------------------------
-    // ESPERAR CONFIRMACIÓN
-    // --------------------------------------------------
+    console.log(
+      `⏳ TX enviada: ${tx.hash}`
+    );
 
-    const receipt = await tx.wait();
+    // ==================================================
+    // ESPERAR RECEIPT
+    // ==================================================
+
+    const receipt =
+      await tx.wait();
 
     if (!receipt) {
       throw new AppError(
@@ -968,17 +1190,25 @@ app.post(
       );
     }
 
-    // --------------------------------------------------
-    // ANALIZAR EVENTOS
-    // --------------------------------------------------
+    console.log(
+      `⛏️ TX minada en bloque ${receipt.blockNumber}`
+    );
+
+    // ==================================================
+    // BUSCAR EVENTOS
+    // ==================================================
 
     let donationReceived = null;
     let donationFailed = null;
 
     for (const log of receipt.logs) {
       /*
-       * Ignorar logs de USDC u otros contratos.
+       * processDonation puede generar también logs
+       * provenientes de USDC.
+       *
+       * Solo analizamos logs emitidos por DonationWallet.
        */
+
       if (
         log.address.toLowerCase() !==
         CONTRACT_ADDRESS.toLowerCase()
@@ -988,127 +1218,184 @@ app.post(
 
       try {
         const parsed =
-          ctx.readContract.interface.parseLog(log);
+          ctx.readContract.interface
+            .parseLog(log);
 
         if (!parsed) {
           continue;
         }
 
-        if (parsed.name === "DonationReceived") {
-          donationReceived = {
-            donor: parsed.args.donor,
+        // ----------------------------------------------
+        // DonationReceived
+        // ----------------------------------------------
 
-            amount: parsed.args.amount.toString(),
+        if (
+          parsed.name ===
+          "DonationReceived"
+        ) {
+          donationReceived = {
+            donor:
+              parsed.args.donor,
+
+            amount:
+              parsed.args.amount.toString(),
 
             donorBalanceAfter:
-              parsed.args.donorBalanceAfter.toString(),
+              parsed.args
+                .donorBalanceAfter
+                .toString(),
 
             timestamp:
-              parsed.args.timestamp.toString(),
+              parsed.args.timestamp
+                .toString(),
           };
         }
 
-        if (parsed.name === "DonationFailed") {
+        // ----------------------------------------------
+        // DonationFailed
+        // ----------------------------------------------
+
+        if (
+          parsed.name ===
+          "DonationFailed"
+        ) {
           donationFailed = {
-            donor: parsed.args.donor,
-            nonce: parsed.args.nonce,
-            reason: parsed.args.reason,
+            donor:
+              parsed.args.donor,
+
+            nonce:
+              parsed.args.nonce,
+
+            reason:
+              parsed.args.reason,
           };
         }
       } catch {
-        // Log que no pertenece a nuestra ABI.
+        // Ignorar logs desconocidos
       }
     }
 
-    // --------------------------------------------------
-    // RESULTADO
-    // --------------------------------------------------
+    // ==================================================
+    // DONATION FAILED
+    // ==================================================
 
     if (donationFailed) {
       console.warn(
-        `⚠️ DonationFailed emitido: ${donationFailed.reason}`
+        "⚠️ DonationFailed:",
+        donationFailed.reason
       );
 
       return res.status(400).json({
         success: false,
 
-        status: "failed",
+        status:
+          "failed",
 
         error: {
-          code: "DONATION_FAILED_EVENT",
-          message: donationFailed.reason,
+          code:
+            "DONATION_FAILED_EVENT",
+
+          message:
+            donationFailed.reason,
         },
 
         tx: {
-          hash: tx.hash,
-          blockNumber: receipt.blockNumber,
+          hash:
+            tx.hash,
 
-          explorerUrl: getExplorerUrl(
-            ctx.chainId,
-            tx.hash
-          ),
+          blockNumber:
+            receipt.blockNumber,
+
+          explorerUrl:
+            getExplorerUrl(
+              ctx.chainId,
+              tx.hash
+            ),
         },
 
-        event: donationFailed,
+        event:
+          donationFailed,
       });
     }
 
+    // ==================================================
+    // EVENTO NO ENCONTRADO
+    // ==================================================
+
     if (!donationReceived) {
       console.warn(
-        "⚠️ La TX fue exitosa pero no se encontró DonationReceived"
+        "⚠️ TX exitosa pero DonationReceived no encontrado"
       );
 
       return res.status(202).json({
         success: false,
 
-        status: "mined_without_expected_event",
+        status:
+          "mined_without_expected_event",
 
         message:
-          "La transacción fue minada correctamente, pero no emitió DonationReceived",
+          "La transacción fue minada correctamente pero no emitió DonationReceived",
 
         tx: {
-          hash: tx.hash,
+          hash:
+            tx.hash,
 
           blockNumber:
             receipt.blockNumber,
 
-          explorerUrl: getExplorerUrl(
-            ctx.chainId,
-            tx.hash
-          ),
+          explorerUrl:
+            getExplorerUrl(
+              ctx.chainId,
+              tx.hash
+            ),
         },
       });
     }
 
+    // ==================================================
+    // ÉXITO
+    // ==================================================
+
     console.log(
-      `✅ Donación confirmada: ${tx.hash}`
+      `✅ DONACIÓN CONFIRMADA: ${tx.hash}`
+    );
+
+    console.log(
+      "======================================"
     );
 
     return res.status(200).json({
       success: true,
 
-      status: "confirmed",
+      status:
+        "confirmed",
 
       donation: {
-        donor: donationReceived.donor,
+        donor:
+          donationReceived.donor,
 
         amount: {
-          raw: donationReceived.amount,
-
-          formatted: ethers.formatUnits(
+          raw:
             donationReceived.amount,
-            ctx.usdcDecimals
-          ),
+
+          formatted:
+            ethers.formatUnits(
+              donationReceived.amount,
+              ctx.usdcDecimals
+            ),
         },
 
         donorBalanceAfter: {
           raw:
-            donationReceived.donorBalanceAfter,
+            donationReceived
+              .donorBalanceAfter,
 
-          formatted: ethers.formatUnits(
-            donationReceived.donorBalanceAfter,
-            ctx.usdcDecimals
-          ),
+          formatted:
+            ethers.formatUnits(
+              donationReceived
+                .donorBalanceAfter,
+              ctx.usdcDecimals
+            ),
         },
 
         timestamp:
@@ -1117,22 +1404,25 @@ app.post(
 
       gas: {
         estimated:
-          estimatedGas?.toString() ?? null,
+          estimatedGas.toString(),
 
         used:
-          receipt.gasUsed?.toString() ?? null,
+          receipt.gasUsed
+            ?.toString() ?? null,
       },
 
       tx: {
-        hash: tx.hash,
+        hash:
+          tx.hash,
 
         blockNumber:
           receipt.blockNumber,
 
-        explorerUrl: getExplorerUrl(
-          ctx.chainId,
-          tx.hash
-        ),
+        explorerUrl:
+          getExplorerUrl(
+            ctx.chainId,
+            tx.hash
+          ),
       },
     });
   })
@@ -1147,8 +1437,11 @@ app.use((req, res) => {
     success: false,
 
     error: {
-      code: "ROUTE_NOT_FOUND",
-      message: "Ruta no encontrada",
+      code:
+        "ROUTE_NOT_FOUND",
+
+      message:
+        "Ruta no encontrada",
     },
   });
 });
@@ -1157,115 +1450,166 @@ app.use((req, res) => {
 // ERROR HANDLER GLOBAL
 // ======================================================
 
-app.use((error, req, res, next) => {
-  console.error("❌ Error:", {
-    method: req.method,
-    path: req.originalUrl,
-    code: error?.code,
-    message: getErrorMessage(error),
-  });
+app.use(
+  (error, req, res, next) => {
+    console.error(
+      "======================================"
+    );
 
-  // Error propio de nuestra API.
-  if (error instanceof AppError) {
+    console.error(
+      "❌ ERROR API"
+    );
+
+    console.error({
+      method:
+        req.method,
+
+      path:
+        req.originalUrl,
+
+      code:
+        error?.code,
+
+      message:
+        getErrorMessage(error),
+    });
+
+    console.error(
+      "======================================"
+    );
+
+    // ==================================================
+    // APP ERROR
+    // ==================================================
+
+    if (
+      error instanceof AppError
+    ) {
+      return res
+        .status(error.statusCode)
+        .json({
+          success: false,
+
+          error: {
+            code:
+              error.code,
+
+            message:
+              error.message,
+
+            ...(
+              !IS_PRODUCTION &&
+              error.details && {
+                details:
+                  error.details,
+              }
+            ),
+          },
+        });
+    }
+
+    // ==================================================
+    // JSON INVÁLIDO
+    // ==================================================
+
+    if (
+      error instanceof SyntaxError &&
+      error.status === 400 &&
+      "body" in error
+    ) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+
+          error: {
+            code:
+              "INVALID_JSON",
+
+            message:
+              "El JSON enviado es inválido",
+          },
+        });
+    }
+
+    // ==================================================
+    // ETHERS CALL EXCEPTION
+    // ==================================================
+
+    if (
+      error.code ===
+        "CALL_EXCEPTION" ||
+      error.code ===
+        "ACTION_REJECTED"
+    ) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+
+          error: {
+            code:
+              error.code,
+
+            message:
+              getRevertReason(
+                error
+              ) ||
+              "La operación fue rechazada por el contrato",
+          },
+        });
+    }
+
+    // ==================================================
+    // RPC
+    // ==================================================
+
+    if (
+      error.code ===
+        "NETWORK_ERROR" ||
+      error.code ===
+        "SERVER_ERROR" ||
+      error.code ===
+        "TIMEOUT"
+    ) {
+      return res
+        .status(502)
+        .json({
+          success: false,
+
+          error: {
+            code:
+              "RPC_ERROR",
+
+            message:
+              "No fue posible comunicarse con la blockchain",
+          },
+        });
+    }
+
+    // ==================================================
+    // ERROR INTERNO
+    // ==================================================
+
     return res
-      .status(error.statusCode)
+      .status(500)
       .json({
         success: false,
 
         error: {
-          code: error.code,
-          message: error.message,
+          code:
+            "INTERNAL_SERVER_ERROR",
 
-          ...(
-            !IS_PRODUCTION &&
-            error.details && {
-              details: error.details,
-            }
-          ),
+          message:
+            IS_PRODUCTION
+              ? "Error interno del servidor"
+              : getErrorMessage(
+                  error
+                ),
         },
       });
   }
-
-  // JSON inválido.
-  if (
-    error instanceof SyntaxError &&
-    error.status === 400 &&
-    "body" in error
-  ) {
-    return res.status(400).json({
-      success: false,
-
-      error: {
-        code: "INVALID_JSON",
-        message: "El JSON enviado es inválido",
-      },
-    });
-  }
-
-  // CORS.
-  if (error.statusCode === 403) {
-    return res.status(403).json({
-      success: false,
-
-      error: {
-        code: "CORS_FORBIDDEN",
-        message: "Origen no permitido",
-      },
-    });
-  }
-
-  /*
-   * Reverts del contrato.
-   */
-  if (
-    error.code === "CALL_EXCEPTION" ||
-    error.code === "ACTION_REJECTED"
-  ) {
-    return res.status(400).json({
-      success: false,
-
-      error: {
-        code: error.code,
-
-        message:
-          getRevertReason(error) ||
-          "La operación fue rechazada por el contrato",
-      },
-    });
-  }
-
-  /*
-   * Errores del RPC.
-   */
-  if (
-    error.code === "NETWORK_ERROR" ||
-    error.code === "SERVER_ERROR" ||
-    error.code === "TIMEOUT"
-  ) {
-    return res.status(502).json({
-      success: false,
-
-      error: {
-        code: "RPC_ERROR",
-        message:
-          "No fue posible comunicarse correctamente con la blockchain",
-      },
-    });
-  }
-
-  // Error desconocido.
-  return res.status(500).json({
-    success: false,
-
-    error: {
-      code: "INTERNAL_SERVER_ERROR",
-
-      message: IS_PRODUCTION
-        ? "Error interno del servidor"
-        : getErrorMessage(error),
-    },
-  });
-});
+);
 
 // ======================================================
 // EXPORT VERCEL
