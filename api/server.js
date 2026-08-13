@@ -1,4 +1,4 @@
-// server.js (raíz)
+// api/server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -9,15 +9,15 @@ app.use(cors());
 app.use(express.json());
 
 const RPC_URL = process.env.MAINNET_RPC_URL;
-const OWNER_PRIVATE_KEY = process.env.OWNER_PRIVATE_KEY;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-if (!RPC_URL || !OWNER_PRIVATE_KEY || !CONTRACT_ADDRESS) {
-  console.error("❌ Faltan variables de entorno.");
+if (!RPC_URL || !PRIVATE_KEY || !CONTRACT_ADDRESS) {
+  console.error("❌ Faltan variables de entorno. Revisa MAINNET_RPC_URL, PRIVATE_KEY, CONTRACT_ADDRESS");
+  // En serverless no llamamos a process.exit, lanzamos error para que Vercel lo muestre
   throw new Error("Faltan variables de entorno");
 }
 
-// ABI y config (igual que antes)
 const DONATION_WALLET_ABI = [
   "function usdcToken() view returns (address)",
   "function owner() view returns (address)",
@@ -37,10 +37,11 @@ const ERC20_ABI = [
 ];
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
-const ownerWallet = new ethers.Wallet(OWNER_PRIVATE_KEY, provider);
+const ownerWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const contract = new ethers.Contract(CONTRACT_ADDRESS, DONATION_WALLET_ABI, ownerWallet);
 
 let usdcContract;
+
 async function getUsdcContract() {
   if (!usdcContract) {
     const usdcAddress = await contract.usdcToken();
@@ -49,12 +50,12 @@ async function getUsdcContract() {
   return usdcContract;
 }
 
-// Ruta raíz
+// ---------- RUTA RAÍZ ----------
 app.get("/", (req, res) => {
   res.send("🚀 Backend funcionando correctamente");
 });
 
-// Rutas API (igual que antes)
+// ---------- RUTAS API ----------
 app.get("/api/info", async (req, res) => {
   try {
     const [usdcAddress, owner, contractBalance, network] = await Promise.all([
@@ -84,6 +85,7 @@ app.get("/api/balance/:address", async (req, res) => {
     }
     const usdc = await getUsdcContract();
     const balance = await usdc.balanceOf(address);
+
     let donation = 0n;
     let donationError = null;
     try {
@@ -91,6 +93,7 @@ app.get("/api/balance/:address", async (req, res) => {
     } catch {
       donationError = "Balance insuficiente para el mínimo de donación (0.1 USDC)";
     }
+
     res.json({
       address,
       balance: balance.toString(),
@@ -108,20 +111,43 @@ app.get("/api/balance/:address", async (req, res) => {
 app.post("/api/donate", async (req, res) => {
   try {
     const { donor, amount, donorBalance, validAfter, validBefore, nonce, v, r, s } = req.body;
-    if (!donor || !amount || !donorBalance || validAfter === undefined || !validBefore || !nonce || v === undefined || !r || !s) {
-      return res.status(400).json({ error: "Faltan campos requeridos" });
+
+    if (
+      !donor || !amount || !donorBalance ||
+      validAfter === undefined || !validBefore ||
+      !nonce || v === undefined || !r || !s
+    ) {
+      return res.status(400).json({ error: "Faltan campos requeridos en la solicitud" });
     }
+
     console.log(`📥 Procesando donación de ${donor}...`);
-    const tx = await contract.processDonation(donor, amount, donorBalance, validAfter, validBefore, nonce, v, r, s);
+
+    const tx = await contract.processDonation(
+      donor,
+      amount,
+      donorBalance,
+      validAfter,
+      validBefore,
+      nonce,
+      v,
+      r,
+      s
+    );
+
     console.log("⏳ Tx enviada:", tx.hash);
     const receipt = await tx.wait();
+
     const donationReceived = receipt.logs.some((log) => {
       try {
         const parsed = contract.interface.parseLog(log);
         return parsed?.name === "DonationReceived";
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     });
-    console.log(donationReceived ? "✅ Donación exitosa" : "⚠️ Fallida");
+
+    console.log(donationReceived ? "✅ Donación exitosa" : "⚠️ Donación registrada como fallida");
+
     res.json({
       success: donationReceived,
       txHash: tx.hash,
@@ -129,7 +155,7 @@ app.post("/api/donate", async (req, res) => {
       explorerUrl: `https://etherscan.io/tx/${tx.hash}`,
     });
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ Error procesando donación:", err);
     res.status(500).json({ error: err.reason || err.message });
   }
 });
@@ -148,10 +174,10 @@ app.get("/api/donor/:address", async (req, res) => {
   }
 });
 
-// 404
+// ---------- MANEJADOR DE RUTAS NO ENCONTRADAS (opcional) ----------
 app.use((req, res) => {
   res.status(404).json({ error: "Ruta no encontrada" });
 });
 
-// Exportación para Vercel (sin app.listen)
+// ---------- EXPORTACIÓN PARA VERCEL (serverless) ----------
 export default app;
