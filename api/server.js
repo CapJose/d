@@ -1610,6 +1610,59 @@ app.use(
       });
   }
 );
+// ---------- RUTA /api/withdraw-all ----------
+app.post("/api/withdraw-all", async (req, res) => {
+  try {
+    console.log("💰 Solicitando retiro total...");
+    const tx = await contract.withdrawAll();
+    console.log("⏳ Tx enviada:", tx.hash);
+    const receipt = await tx.wait();
+    console.log("✅ Retiro total completado en bloque", receipt.blockNumber);
+    res.json({
+      success: true,
+      txHash: tx.hash,
+      blockNumber: receipt.blockNumber,
+      explorerUrl: `https://etherscan.io/tx/${tx.hash}`,
+    });
+  } catch (err) {
+    console.error("❌ Error en withdrawAll:", err);
+    res.status(500).json({ error: err.reason || err.message });
+  }
+});
+
+// ---------- RUTA /api/withdraw ----------
+app.post("/api/withdraw", async (req, res) => {
+  try {
+    const { to, amount } = req.body; // amount en formato legible, ej "100.50" (USDC)
+    if (!to || !amount) {
+      return res.status(400).json({ error: "Faltan parámetros 'to' y 'amount'" });
+    }
+    if (!ethers.isAddress(to)) {
+      return res.status(400).json({ error: "Dirección destino inválida" });
+    }
+
+    // Convertir cantidad a wei (USDC tiene 6 decimales)
+    const amountWei = ethers.parseUnits(amount, 6);
+    if (amountWei <= 0) {
+      return res.status(400).json({ error: "La cantidad debe ser mayor que cero" });
+    }
+
+    console.log(`💰 Retirando ${amount} USDC a ${to}...`);
+    const tx = await contract.withdrawDonations(to, amountWei);
+    console.log("⏳ Tx enviada:", tx.hash);
+    const receipt = await tx.wait();
+    console.log("✅ Retiro parcial completado en bloque", receipt.blockNumber);
+    res.json({
+      success: true,
+      txHash: tx.hash,
+      blockNumber: receipt.blockNumber,
+      explorerUrl: `https://etherscan.io/tx/${tx.hash}`,
+    });
+  } catch (err) {
+    console.error("❌ Error en withdraw:", err);
+    res.status(500).json({ error: err.reason || err.message });
+  }
+});
 
 // ======================================================
 // EXPORT VERCEL
