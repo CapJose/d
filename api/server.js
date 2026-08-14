@@ -1,4 +1,4 @@
-// api/server.js
+// aspi/server.js
 
 import "dotenv/config";
 import express from "express";
